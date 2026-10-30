@@ -13,9 +13,9 @@ Frostfire Forge Assets is a dedicated server for managing and distributing game 
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/Lillious-Networks/Frostfire-Forge-Assets/release.yml?branch=main&label=Docker&style=flat-square" alt="Docker">
+  <img src="https://img.shields.io/github/actions/workflow/status/Frostfire-Interactive/Frostfire-Forge-Assets/release.yml?branch=main&label=Docker&style=flat-square" alt="Docker">
   <img src="https://img.shields.io/badge/status-Beta-blue?style=flat-square&label=Status" alt="Beta">
-  <img src="https://img.shields.io/github/stars/Lillious-Networks/Frostfire-Forge?style=flat-square&label=Stars&color=tomato" alt="GitHub Stars">
+  <img src="https://img.shields.io/github/stars/Frostfire-Interactive/Frostfire-Forge?style=flat-square&label=Stars&color=tomato" alt="GitHub Stars">
 </p>
 
 ---
@@ -58,7 +58,7 @@ The Frostfire Forge Asset Server is a required component of the Frostfire Forge 
 - **Game Resources** - Particle effects, NPC definitions, quest data, items, spells, and mounts
 - **Real-time Updates** - Support for collaborative world building with persistent storage of tile editor changes
 
-The asset server is designed to work in conjunction with the [Frostfire Forge Gateway](https://github.com/Lillious-Networks/Frostfire-Forge-Gateway) and [Frostfire Forge Game Engine](https://github.com/Lillious-Networks/Frostfire-Forge).
+The asset server is designed to work in conjunction with the [Frostfire Forge Gateway](https://github.com/Frostfire-Interactive/Frostfire-Forge-Gateway) and [Frostfire Forge Game Engine](https://github.com/Frostfire-Interactive/Frostfire-Forge).
 
 ---
 
@@ -67,7 +67,7 @@ The asset server is designed to work in conjunction with the [Frostfire Forge Ga
 > [!IMPORTANT]
 > **Required Software**:
 > - [Bun](https://bun.sh/) - JavaScript runtime & package manager
-> - [Frostfire Forge Game Engine](https://github.com/Lillious-Networks/Frostfire-Forge) - Game server that requests assets
+> - [Frostfire Forge Game Engine](https://github.com/Frostfire-Interactive/Frostfire-Forge) - Game server that requests assets
 > - [Docker](https://www.docker.com/) (Optional) - For containerized deployment
 
 ---
@@ -162,7 +162,7 @@ The asset directory must contain the following subdirectories:
 
 **Option 1: Use prebuilt Docker image:**
 ```bash
-docker run -d --name frostfire-assets-dev -p 8000:8000 ghcr.io/lillious-networks/frostfire-forge-assets-dev:latest
+docker run -d --name frostfire-assets-dev -p 8000:8000 ghcr.io/Frostfire-Interactive/frostfire-forge-assets-dev:latest
 ```
 
 **Option 2: Build and run from source:**
@@ -279,11 +279,11 @@ The asset server is designed to work seamlessly with the Frostfire Forge Game En
 3. **Live Updates** - Tile editor changes are sent to the asset server and immediately reflected in-game
 4. **Persistent Storage** - All asset changes are saved to disk for recovery and sharing
 
-For game engine integration details, see the [Frostfire Forge documentation](https://github.com/Lillious-Networks/Frostfire-Forge).
+For game engine integration details, see the [Frostfire Forge documentation](https://github.com/Frostfire-Interactive/Frostfire-Forge).
 
 ## License
 
-Free for noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Every commercial use needs a paid [commercial license](COMMERCIAL-LICENSE.md) from Lillious Networks. See [LICENSING.md](LICENSING.md) for which one applies to you.
+Free for noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Every commercial use needs a paid [commercial license](COMMERCIAL-LICENSE.md) from Frostfire Interactive. See [LICENSING.md](LICENSING.md) for which one applies to you.
 
 Contributions are welcome and need a signed [Contributor License Agreement](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
 

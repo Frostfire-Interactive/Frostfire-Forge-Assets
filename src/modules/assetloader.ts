@@ -7,6 +7,7 @@ import crypto from "crypto";
 import os from "os";
 import { ChunkedMapBake, TilesetImages, bakeWorldMap, bakeChunkedWorldMap, type ChunkedMap } from "./worldmap";
 import { loadWorlds, listWorlds, onWorldTilesChanged, readChunkTiles, type World, type WorldTileChange } from "./worldstore";
+import { assetsVersion, contentVersion } from "./assetversion";
 
 // Load assets path from environment variable or use default
 function getAssetPath(): string {
@@ -138,7 +139,7 @@ async function loadAudio() {
     const ratio = (originalSize / compressedSize).toFixed(2);
     const savings = (((originalSize - compressedSize) / originalSize) * 100).toFixed(2);
 
-    audioCache.push({ name: file, data: compressedData.toString("base64") });
+    audioCache.push({ name: file, data: compressedData.toString("base64"), version: contentVersion(buffer) });
 
     log.debug(`Loaded audio: ${file}`);
     log.debug(`Compressed audio: ${file}
@@ -241,7 +242,9 @@ async function loadSpriteSheetTemplates() {
       name: file.replace(".json", ""),
       template: templateJson,
       image: imageBuffer,
-      slot: slotFromPath(pngFile, file)
+      slot: slotFromPath(pngFile, file),
+      templateVersion: contentVersion(templateJson),
+      imageVersion: imageBuffer ? contentVersion(imageBuffer) : ""
     });
   });
 
@@ -304,7 +307,9 @@ async function loadSpriteSheetTemplates() {
       name: filename,
       template: templateToUse,
       image: imageBuffer,
-      slot: slotFromPath(pngFile)
+      slot: slotFromPath(pngFile),
+      templateVersion: templateToUse ? contentVersion(templateToUse) : "",
+      imageVersion: contentVersion(imageBuffer)
     });
 
     let templateName = 'none';
@@ -346,7 +351,7 @@ async function loadSprites() {
 
     const compressedData = zlib.gzipSync(base64Data);
 
-    sprites.push({ name, data: compressedData.toString("base64") });
+    sprites.push({ name, data: compressedData.toString("base64"), version: contentVersion(rawData) });
 
     const originalSize = base64Data.length;
     const compressedSize = compressedData.length;
@@ -387,7 +392,7 @@ async function loadIcons() {
 
     const compressedData = zlib.gzipSync(base64Data);
 
-    icons.push({ name, data: compressedData.toString("base64") });
+    icons.push({ name, data: compressedData.toString("base64"), version: contentVersion(rawData) });
 
     const originalSize = base64Data.length;
     const compressedSize = compressedData.length;
@@ -899,12 +904,30 @@ export async function initializeAssets() {
   await loadSprites();
   await loadIcons();
   await loadAudio();
+  await loadAssetVersion();
   loadAllMaps();
   await loadWorldMaps();
 
   const assetLoadingEndTime = performance.now();
   const totalAssetLoadingTime = (assetLoadingEndTime - assetLoadingStartTime).toFixed(2);
   log.success(`✔ All assets loaded successfully in ${totalAssetLoadingTime}ms`);
+}
+
+/**
+ * The asset version served at /asset-version: one hash over the sprites, icons and sprite sheets (template and image)
+ * read at startup. The gateway's service worker keeps those cache-first and drops its copies when this changes.
+ */
+async function loadAssetVersion() {
+  const sprites = (await assetCache.get("sprites") as SpriteData[] | null) ?? [];
+  const icons = (await assetCache.get("icons") as IconData[] | null) ?? [];
+  const sheets = (await assetCache.get("spriteSheetTemplates") as SpriteSheetTemplate[] | null) ?? [];
+  const version = assetsVersion([
+    sprites,
+    icons,
+    sheets.map((s) => ({ name: s.name, version: `${s.templateVersion}.${s.imageVersion}` })),
+  ]);
+  await assetCache.add("assetVersion", version);
+  log.debug(`Asset version: ${version}`);
 }
 
 interface TilesetData {
@@ -919,16 +942,23 @@ interface SpriteSheetTemplate {
   image: Buffer | null;
   /** Equipment slot / kind, from the folder the image lives in. Lets editors browse by slot. */
   slot: string;
+  /** Content hashes of the template JSON and the image ("" when there is none): the ETags of their endpoints. */
+  templateVersion: string;
+  imageVersion: string;
 }
 
 interface SpriteData {
   name: string;
   data: string;
+  /** Content hash of the PNG: the /sprite ETag. */
+  version: string;
 }
 
 interface IconData {
   name: string;
   data: string;
+  /** Content hash of the PNG: the /icon ETag. */
+  version: string;
 }
 
 interface MapData {
@@ -941,4 +971,6 @@ interface MapData {
 interface AudioData {
   name: string;
   data: string;
+  /** Content hash of the file: the /audio ETag. */
+  version: string;
 }

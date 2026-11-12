@@ -8,6 +8,7 @@ import { startHttpsServers, getInternalServerOptions } from "./modules/https_ser
 // Load asset loader
 import { initializeAssets, applyChunksWithRebase, getAssetsPath, normalizeInfiniteMap, registerNewMap } from "./modules/assetloader";
 import assetCache from "./services/assetCache";
+import { revalidated } from "./modules/assetversion";
 import { addWorld, getWorld, listWorlds, readWorldFile, readChunkTiles, buildWorldChunk, saveWorldChunks, saveWorldProperties, WorldSaveError, WORLD_SYNC_FILES, type WorldSyncFile } from "./modules/worldstore";
 import { TilesetImages, bakeChunkedWorldMap } from "./modules/worldmap";
 import { checkTileSoundChanges, getTileSounds, saveTileSounds, type TileSoundChange } from "./modules/tilesounds";
@@ -228,17 +229,21 @@ function parseRangeHeader(range: string | null, size: number): { start: number; 
 
 // Serve a raw audio buffer with correct MIME type, ETag/conditional GET,
 // and Range (206 Partial Content) support so <audio> elements can seek.
-function serveAudioBuffer(req: Request, fileName: string, data: Buffer): Response {
+// Revalidated on every use (no-cache + ETag = the file's content hash): a sound
+// replaced under the same name is picked up after a restart, an unchanged one
+// costs a 304.
+function serveAudioBuffer(req: Request, fileName: string, data: Buffer, version: string): Response {
   const mime = getAudioMimeType(fileName);
   const size = data.length;
-  const etag = `"${size}-${Buffer.from(fileName).toString("base64url")}"`;
+  const etag = `"${version}"`;
   const baseHeaders: Record<string, string> = {
     "Content-Type": mime,
     "Accept-Ranges": "bytes",
-    "Cache-Control": "public, max-age=31536000, immutable",
+    "Cache-Control": "no-cache",
     "Content-Length": size.toString(),
     "ETag": etag,
     ...CORS_AUDIO_ALLOW_HEADERS,
+    "Access-Control-Expose-Headers": `${CORS_AUDIO_ALLOW_HEADERS["Access-Control-Expose-Headers"]}, ETag`,
   };
 
   if (req.headers.get("if-none-match") === etag) {
@@ -268,6 +273,14 @@ function serveAudioBuffer(req: Request, fileName: string, data: Buffer): Respons
 const routes = {
   "/status": {
     GET: () => new Response(JSON.stringify({ status: "OK" }), { status: 200, headers: CORS_HEADERS })
+  },
+  // One hash over the sprites, icons and sprite sheets read at startup. The gateway's service worker keeps those
+  // cache-first and drops its copies from this server when the hash changes.
+  "/asset-version": {
+    GET: async () => new Response(JSON.stringify({ version: (await assetCache.get("assetVersion")) ?? "" }), {
+      status: 200,
+      headers: { ...CORS_HEADERS, "Cache-Control": "no-store" }
+    })
   },
   "/tileset": {
     GET: async (req: Request) => {
@@ -443,7 +456,9 @@ const routes = {
             outdatedMaps.push({ name: mapName, checksum: mapChecksum, data: map.data });
           }
         }
-        log.info(`[AssetServer] Map sync for ${serverId}: ${outdatedMaps.length} outdated maps`);
+        // Every game server checks every few seconds: only a check that finds something is worth a line
+        if (outdatedMaps.length > 0) log.info(`[AssetServer] Map sync for ${serverId}: ${outdatedMaps.length} outdated maps`);
+        else log.debug(`[AssetServer] Map sync for ${serverId}: up to date`);
         // Outdated maps carry full map data - this response can be megabytes.
         // gzip cuts it 80-90%; Bun's fetch on the game server decompresses
         // transparently, so no consumer changes are needed.
@@ -477,7 +492,7 @@ const routes = {
           return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
         }
         const worlds = listWorlds().map(world => ({ id: world.id, name: world.name, files: world.fileHashes }));
-        log.info(`[AssetServer] World sync for ${serverId}: ${worlds.length} world(s)`);
+        log.debug(`[AssetServer] World sync for ${serverId}: ${worlds.length} world(s)`);
         return new Response(JSON.stringify({ success: true, worlds }), { status: 200, headers: CORS_HEADERS });
       } catch (error: any) {
         log.error(`Error in /world-list: ${error.message}`);
@@ -835,10 +850,7 @@ const routes = {
 
         // Return the cached template JSON directly
         const templateData = typeof template.template === 'string' ? template.template : JSON.stringify(template.template);
-        return new Response(templateData, {
-          status: 200,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
-        });
+        return revalidated(req, template.templateVersion, { ...CORS_HEADERS, "Content-Type": "application/json" }, () => templateData);
       } catch (error: any) {
         log.error(`Error serving sprite sheet template: ${error.message}`);
         return new Response(JSON.stringify({ error: "Internal server error" }), {
@@ -888,16 +900,12 @@ const routes = {
         const imageData = Buffer.isBuffer(template.image) ? template.image : Buffer.from(template.image);
 
         // Return the cached image buffer directly as PNG
-        return new Response(imageData, {
-          status: 200,
-          headers: {
-            "Content-Type": "image/png",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Content-Length": imageData.length.toString()
-          }
-        });
+        return revalidated(req, template.imageVersion, {
+          "Content-Type": "image/png",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        }, () => imageData);
       } catch (error: any) {
         log.error(`Error serving sprite sheet image: ${error.message}`);
         return new Response(JSON.stringify({ error: "Internal server error" }), {
@@ -937,18 +945,14 @@ const routes = {
           return serveMissingIcon();
         }
 
-        const spriteData = decodeCachedImage(entry.data);
-        return new Response(spriteData, {
-          status: 200,
-          headers: {
-            "Content-Type": "image/png",
-            "Cache-Control": "public, max-age=31536000",
-            "Content-Length": spriteData.length.toString(),
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-          }
-        });
+        // Revalidated on every use (no-cache + ETag = the PNG's content hash): a sprite replaced under the same name is
+        // picked up after a restart. The gateway's service worker keeps it cache-first until /asset-version changes.
+        return revalidated(req, entry.version, {
+          "Content-Type": "image/png",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type"
+        }, () => decodeCachedImage(entry.data));
       } catch (error: any) {
         log.error(`Error serving sprite: ${error.message}`);
         return new Response(JSON.stringify({ error: "Internal server error" }), {
@@ -1065,18 +1069,13 @@ const routes = {
           return serveMissingIcon();
         }
 
-        const iconData = decodeCachedImage(entry.data);
-        return new Response(iconData, {
-          status: 200,
-          headers: {
-            "Content-Type": "image/png",
-            "Cache-Control": "public, max-age=31536000",
-            "Content-Length": iconData.length.toString(),
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-          }
-        });
+        // Revalidated on every use, as /sprite.
+        return revalidated(req, entry.version, {
+          "Content-Type": "image/png",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type"
+        }, () => decodeCachedImage(entry.data));
       } catch (error: any) {
         log.error(`Error serving icon: ${error.message}`);
         return new Response(JSON.stringify({ error: "Internal server error" }), {
@@ -1132,7 +1131,7 @@ const routes = {
         }
 
         const raw = decodeCachedAudio(entry.data);
-        return serveAudioBuffer(req, entry.name, raw);
+        return serveAudioBuffer(req, entry.name, raw, entry.version);
       } catch (error: any) {
         log.error(`Error serving audio: ${error.message}`);
         return new Response(JSON.stringify({ error: "Internal server error" }), {

@@ -9,7 +9,7 @@ import { startHttpsServers, getInternalServerOptions } from "./modules/https_ser
 import { initializeAssets, applyChunksWithRebase, getAssetsPath, normalizeInfiniteMap, registerNewMap } from "./modules/assetloader";
 import assetCache from "./services/assetCache";
 import { revalidated } from "./modules/assetversion";
-import mapChanges from "./modules/mapchanges";
+import mapChanges, { mapEventStream } from "./modules/mapchanges";
 import { addWorld, getWorld, listWorlds, readWorldFile, readChunkTiles, buildWorldChunk, saveWorldChunks, saveWorldProperties, WorldSaveError, WORLD_SYNC_FILES, type WorldSyncFile } from "./modules/worldstore";
 import { TilesetImages, bakeChunkedWorldMap } from "./modules/worldmap";
 import { checkTileSoundChanges, getTileSounds, saveTileSounds, type TileSoundChange } from "./modules/tilesounds";
@@ -441,7 +441,11 @@ const routes = {
         if (requestAuthKey !== authKey) {
           return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
         }
-        // The place in the list of changed maps (/map-changes) before comparing: a map saved meanwhile is listed after it
+        // Before start the list's run is not known yet: a place given now would be from no run at all
+        if (!mapChanges.ready) {
+          return new Response(JSON.stringify({ error: "The maps are still loading" }), { status: 503, headers: CORS_HEADERS });
+        }
+        // The place in the list of changed maps (/map-events) before comparing: a map saved meanwhile is listed after it
         const changes = mapChanges.place();
         const maps = await assetCache.get("maps") as any[];
         if (!maps || maps.length === 0) {
@@ -459,7 +463,7 @@ const routes = {
             outdatedMaps.push({ name: mapName, checksum: mapChecksum, data: map.data });
           }
         }
-        // Every game server checks every few seconds: only a check that finds something is worth a line
+        // A game server compares every map at start and after a restart here: only a compare that finds something is worth a line
         if (outdatedMaps.length > 0) log.info(`[AssetServer] Map sync for ${serverId}: ${outdatedMaps.length} outdated maps`);
         else log.debug(`[AssetServer] Map sync for ${serverId}: up to date`);
         // Outdated maps carry full map data - this response can be megabytes.
@@ -483,14 +487,17 @@ const routes = {
       }
     }
   },
-  // The maps saved here since the place the game server was last told (modules/mapchanges.ts), polled every few
-  // seconds: only the maps that changed are sent, never a comparison of every map
+  // The maps saved here since the place the game server was last told (modules/mapchanges.ts), for a game server
+  // that polls (an engine older than /map-events): only the maps that changed are sent, never a comparison of every map
   "/map-changes": {
     POST: async (req: Request) => {
       try {
         const { epoch, since, serverId, authKey: requestAuthKey } = await req.json() as { epoch?: unknown; since?: unknown; serverId?: string; authKey: string };
         if (requestAuthKey !== authKey) {
           return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
+        }
+        if (!mapChanges.ready) {
+          return new Response(JSON.stringify({ error: "The maps are still loading" }), { status: 503, headers: CORS_HEADERS });
         }
         const answer = mapChanges.since(epoch, since);
         if (answer.maps.length > 0) log.info(`[AssetServer] Map changes for ${serverId}: ${answer.maps.length} map(s)`);
@@ -501,6 +508,32 @@ const routes = {
         return new Response(payload, { status: 200, headers: CORS_HEADERS });
       } catch (error: any) {
         log.error(`Error in /map-changes: ${error.message}`);
+        return new Response(JSON.stringify({ error: "Invalid request body" }), { status: 400, headers: CORS_HEADERS });
+      }
+    }
+  },
+  // The changes a game server follows while it runs (modules/mapchanges.ts mapEventStream): the maps changed since its
+  // place, then each map saved here and each world change as it is made, one JSON object per line. The asset server
+  // pushes; the game server makes no request until the connection ends (a restart here), then connects again.
+  "/map-events": {
+    POST: async (req: Request) => {
+      try {
+        const { epoch, since, serverId, authKey: requestAuthKey } = await req.json() as { epoch?: unknown; since?: unknown; serverId?: string; authKey: string };
+        if (requestAuthKey !== authKey) {
+          return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
+        }
+        if (!mapChanges.ready) {
+          return new Response(JSON.stringify({ error: "The maps are still loading" }), { status: 503, headers: CORS_HEADERS });
+        }
+        const first = mapChanges.since(epoch, since);
+        if (first.maps.length > 0) log.info(`[AssetServer] Map changes for ${serverId}: ${first.maps.length} map(s)`);
+        else if (first.full) log.info(`[AssetServer] ${serverId} compares every map once: its place is from another run`);
+        return new Response(mapEventStream(mapChanges, epoch, since), {
+          status: 200,
+          headers: { ...CORS_HEADERS, "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
+        });
+      } catch (error: any) {
+        log.error(`Error in /map-events: ${error.message}`);
         return new Response(JSON.stringify({ error: "Invalid request body" }), { status: 400, headers: CORS_HEADERS });
       }
     }
@@ -616,6 +649,7 @@ const routes = {
           try {
             const changed = saveWorldChunks(world, chunks);
             clearChunkCacheForMap(mapFile);
+            if (changed.length > 0) mapChanges.worldsChanged();
             log.info(`[AssetServer] World ${world.id} saved by ${serverId || "a server"}: ${changed.length} of ${chunks.length} chunk(s) changed`);
             return new Response(JSON.stringify({ success: true, checksum: world.checksum, changed, message: `Saved ${changed.length} chunk(s) for map ${mapName}` }), { status: 200, headers: CORS_HEADERS });
           } catch (worldError: any) {
@@ -700,6 +734,7 @@ const routes = {
         if (world) {
           try {
             saveWorldProperties(world, graveyards, warps);
+            mapChanges.worldsChanged();
             log.info(`[AssetServer] World ${world.id}: graveyards / warps saved`);
             return new Response(JSON.stringify({ success: true, checksum: world.checksum, message: `Saved properties for map ${mapName}` }), { status: 200, headers: CORS_HEADERS });
           } catch (worldError: any) {
@@ -1238,6 +1273,7 @@ const routes = {
         if (request.kind === "world") {
           writeBlankWorld(path.join(mapDir, `${request.name}.world`), request, defs.tilesets);
           await registerNewMap(request.name, addWorld(mapDir, request.name));
+          mapChanges.worldsChanged();
           log.info(`[AssetServer] World ${request.name} created (${request.width} x ${request.height} tiles)`);
           return new Response(JSON.stringify({ success: true, name: request.name, kind: "world" }), { status: 200, headers: CORS_HEADERS });
         }

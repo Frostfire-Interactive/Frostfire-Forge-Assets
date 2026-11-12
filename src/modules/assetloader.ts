@@ -8,7 +8,7 @@ import os from "os";
 import { ChunkedMapBake, TilesetImages, bakeWorldMap, bakeChunkedWorldMap, type ChunkedMap } from "./worldmap";
 import { loadWorlds, listWorlds, onWorldTilesChanged, readChunkTiles, type World, type WorldTileChange } from "./worldstore";
 import { assetsVersion, contentVersion } from "./assetversion";
-import mapChanges from "./mapchanges";
+import mapChanges, { startMapChanges } from "./mapchanges";
 
 // Load assets path from environment variable or use default
 function getAssetPath(): string {
@@ -623,6 +623,10 @@ function loadAllMaps() {
 
   assetCache.add("maps", maps);
   log.success(`Loaded ${maps.length} map(s) in ${(performance.now() - now).toFixed(2)}ms`);
+
+  // The maps that differ from the last run are what the game servers are sent when they connect again (/map-events)
+  const listed = startMapChanges(mapDir, maps);
+  if (listed > 0) log.info(`${listed} map(s) changed since the last run: sent to the game servers`);
 
   // Worlds: maps too large for one file, kept as <id>.world directories
   loadWorlds(mapDir, new Set(mapFiles));

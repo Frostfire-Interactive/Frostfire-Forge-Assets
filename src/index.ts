@@ -9,6 +9,7 @@ import { startHttpsServers, getInternalServerOptions } from "./modules/https_ser
 import { initializeAssets, applyChunksWithRebase, getAssetsPath, normalizeInfiniteMap, registerNewMap } from "./modules/assetloader";
 import assetCache from "./services/assetCache";
 import { revalidated } from "./modules/assetversion";
+import mapChanges from "./modules/mapchanges";
 import { addWorld, getWorld, listWorlds, readWorldFile, readChunkTiles, buildWorldChunk, saveWorldChunks, saveWorldProperties, WorldSaveError, WORLD_SYNC_FILES, type WorldSyncFile } from "./modules/worldstore";
 import { TilesetImages, bakeChunkedWorldMap } from "./modules/worldmap";
 import { checkTileSoundChanges, getTileSounds, saveTileSounds, type TileSoundChange } from "./modules/tilesounds";
@@ -440,9 +441,11 @@ const routes = {
         if (requestAuthKey !== authKey) {
           return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
         }
+        // The place in the list of changed maps (/map-changes) before comparing: a map saved meanwhile is listed after it
+        const changes = mapChanges.place();
         const maps = await assetCache.get("maps") as any[];
         if (!maps || maps.length === 0) {
-          return new Response(JSON.stringify({ success: true, outdatedMaps: [], maps: [] }), { status: 200, headers: CORS_HEADERS });
+          return new Response(JSON.stringify({ success: true, outdatedMaps: [], maps: [], changes }), { status: 200, headers: CORS_HEADERS });
         }
         // Every map held here, by name. The game server removes local maps that
         // are not in this list, so its folder stays a copy of this one.
@@ -462,7 +465,7 @@ const routes = {
         // Outdated maps carry full map data - this response can be megabytes.
         // gzip cuts it 80-90%; Bun's fetch on the game server decompresses
         // transparently, so no consumer changes are needed.
-        const payload = JSON.stringify({ success: true, outdatedMaps, maps: mapNames });
+        const payload = JSON.stringify({ success: true, outdatedMaps, maps: mapNames, changes });
         if (acceptsGzip(req)) {
           return new Response(zlib.gzipSync(payload), {
             status: 200,
@@ -476,6 +479,28 @@ const routes = {
         return new Response(payload, { status: 200, headers: CORS_HEADERS });
       } catch (error: any) {
         log.error(`Error in /map-checksums: ${error.message}`);
+        return new Response(JSON.stringify({ error: "Invalid request body" }), { status: 400, headers: CORS_HEADERS });
+      }
+    }
+  },
+  // The maps saved here since the place the game server was last told (modules/mapchanges.ts), polled every few
+  // seconds: only the maps that changed are sent, never a comparison of every map
+  "/map-changes": {
+    POST: async (req: Request) => {
+      try {
+        const { epoch, since, serverId, authKey: requestAuthKey } = await req.json() as { epoch?: unknown; since?: unknown; serverId?: string; authKey: string };
+        if (requestAuthKey !== authKey) {
+          return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
+        }
+        const answer = mapChanges.since(epoch, since);
+        if (answer.maps.length > 0) log.info(`[AssetServer] Map changes for ${serverId}: ${answer.maps.length} map(s)`);
+        const payload = JSON.stringify({ success: true, ...answer });
+        if (answer.maps.length > 0 && acceptsGzip(req)) {
+          return new Response(zlib.gzipSync(payload), { status: 200, headers: { ...CORS_HEADERS, "Content-Encoding": "gzip", "Vary": "Accept-Encoding" } });
+        }
+        return new Response(payload, { status: 200, headers: CORS_HEADERS });
+      } catch (error: any) {
+        log.error(`Error in /map-changes: ${error.message}`);
         return new Response(JSON.stringify({ error: "Invalid request body" }), { status: 400, headers: CORS_HEADERS });
       }
     }
@@ -552,6 +577,7 @@ const routes = {
           maps.push({ name: mapName, data: mapData, checksum: checksum });
         }
         await assetCache.set("maps", maps);
+        mapChanges.record({ name: mapName, checksum, data: mapData });
         clearChunkCacheForMap(mapName);
         log.info(`[AssetServer] Map updated: ${mapName} by server ${serverId}`);
         return new Response(JSON.stringify({ success: true, checksum: checksum, message: "Map updated successfully" }), { status: 200, headers: CORS_HEADERS });
@@ -624,6 +650,7 @@ const routes = {
         };
 
         await assetCache.set("maps", maps);
+        mapChanges.record({ name: mapFile, checksum: newChecksum, data: mapData });
         clearChunkCacheForMap(mapFile);
 
         // Persist changes to disk
@@ -787,6 +814,7 @@ const routes = {
         };
 
         await assetCache.set("maps", maps);
+        mapChanges.record({ name: mapFile, checksum: newChecksum, data: mapData });
         clearChunkCacheForMap(mapFile);
         log.info(`[AssetServer] Updated cache for map: ${mapFile}`);
 

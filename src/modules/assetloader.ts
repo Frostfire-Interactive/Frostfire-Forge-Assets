@@ -8,6 +8,7 @@ import os from "os";
 import { ChunkedMapBake, TilesetImages, bakeWorldMap, bakeChunkedWorldMap, type ChunkedMap } from "./worldmap";
 import { loadWorlds, listWorlds, onWorldTilesChanged, readChunkTiles, type World, type WorldTileChange } from "./worldstore";
 import { assetsVersion, contentVersion } from "./assetversion";
+import mapChanges from "./mapchanges";
 
 // Load assets path from environment variable or use default
 function getAssetPath(): string {
@@ -593,6 +594,7 @@ export async function registerNewMap(name: string, world?: World): Promise<void>
     const maps = (await assetCache.get("maps") as MapData[] | null) ?? [];
     maps.push(map);
     await assetCache.add("maps", maps);
+    mapChanges.record(map);
     try { png = bakeWorldMap(map.data, images); } catch (e: any) { log.warn(`Could not bake the world map of ${map.name}: ${e?.message ?? e}`); }
   }
   if (png) {

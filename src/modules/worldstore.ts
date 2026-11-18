@@ -3,6 +3,7 @@ import path from "path";
 import zlib from "zlib";
 import crypto from "crypto";
 import log from "./logger";
+import { cleanZones, type MapZone } from "./zones";
 
 // World maps: a map too large to hold as one Tiled file (the 10240 x 10240 continent) lives in the maps folder as a
 // directory <id>.world/ written by the map generator:
@@ -613,9 +614,10 @@ function writeManifest(world: World, bitsetHashes?: { "collision.bits": string; 
  * The editor's graveyards and warps of a world, written into its manifest as the objects of its Graveyards and Warps
  * layers (the game server reads them from there like any map's). Each list is the whole list, in the shape the game
  * server holds it: graveyards { name, position: { x, y } }, warps { name, map, x, y, position: { x, y },
- * size: { width, height } }. A list left out is kept as it is.
+ * size: { width, height } }. A list left out is kept as it is. Zones (modules/zones.ts) replace manifest.zones whole,
+ * generated ones included: the editor sends them back with their own keys.
  */
-export function saveWorldProperties(world: World, graveyards?: any, warps?: any): void {
+export function saveWorldProperties(world: World, graveyards?: any, warps?: any, zones?: unknown): void {
   // the save builds on the manifest as it is on disk, so objects saved there by another program are kept
   refreshWorld(world);
   const manifest = world.manifest;
@@ -657,6 +659,14 @@ export function saveWorldProperties(world: World, graveyards?: any, warps?: any)
     };
   });
 
+  let newZones: MapZone[] | null = null;
+  if (zones !== undefined) {
+    const cleaned = cleanZones(zones, Number(manifest.width) || world.width, Number(manifest.height) || world.height);
+    if ("error" in cleaned) throw new WorldSaveError(cleaned.error);
+    newZones = cleaned.zones;
+  }
+
+  if (newZones) manifest.zones = newZones;
   if (newGraveyards) {
     replace("Graveyards", old => newGraveyards.map(g => ({ id: old.get(g.name)?.id ?? nextId++, layer: "Graveyards", name: g.name, type: "graveyard", x: g.x, y: g.y, width: 0, height: 0, point: true, properties: [] })));
   }

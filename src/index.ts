@@ -11,6 +11,7 @@ import assetCache from "./services/assetCache";
 import { revalidated } from "./modules/assetversion";
 import mapChanges, { mapEventStream } from "./modules/mapchanges";
 import { addWorld, getWorld, listWorlds, readWorldFile, readChunkTiles, buildWorldChunk, saveWorldChunks, saveWorldProperties, WorldSaveError, WORLD_SYNC_FILES, type WorldSyncFile } from "./modules/worldstore";
+import { cleanZones } from "./modules/zones";
 import { TilesetImages, bakeChunkedWorldMap } from "./modules/worldmap";
 import { checkTileSoundChanges, getTileSounds, saveTileSounds, type TileSoundChange } from "./modules/tilesounds";
 import { blankTiledMap, checkCreateMap, pngSize, tilesetDefinitions, writeBlankWorld, type CreateMapRequest } from "./modules/mapcreate";
@@ -710,8 +711,8 @@ const routes = {
   "/save-map-properties": {
     POST: async (req: Request) => {
       try {
-        const body = await req.json() as { mapName: string; graveyards?: any; warps?: any; authKey: string };
-        const { mapName, graveyards, warps, authKey: requestAuthKey } = body;
+        const body = await req.json() as { mapName: string; graveyards?: any; warps?: any; zones?: unknown; authKey: string };
+        const { mapName, graveyards, warps, zones, authKey: requestAuthKey } = body;
 
         if (requestAuthKey !== authKey) {
           return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
@@ -733,9 +734,9 @@ const routes = {
         const world = getWorld(mapFile);
         if (world) {
           try {
-            saveWorldProperties(world, graveyards, warps);
+            saveWorldProperties(world, graveyards, warps, zones);
             mapChanges.worldsChanged();
-            log.info(`[AssetServer] World ${world.id}: graveyards / warps saved`);
+            log.info(`[AssetServer] World ${world.id}: graveyards / warps / zones saved`);
             return new Response(JSON.stringify({ success: true, checksum: world.checksum, message: `Saved properties for map ${mapName}` }), { status: 200, headers: CORS_HEADERS });
           } catch (worldError: any) {
             if (worldError instanceof WorldSaveError) {
@@ -753,6 +754,16 @@ const routes = {
 
         // Update map data with graveyards and warps
         const mapData = maps[mapIndex].data;
+
+        // Zones (modules/zones.ts) live in a top-level "zones" key in tiles; a list is the whole list, an empty one
+        // removes them all. Checked before anything is changed, so a bad list leaves the map as it was.
+        if (zones !== undefined) {
+          const cleaned = cleanZones(zones, Number(mapData.width) || 0, Number(mapData.height) || 0);
+          if ("error" in cleaned) {
+            return new Response(JSON.stringify({ error: cleaned.error }), { status: 400, headers: CORS_HEADERS });
+          }
+          mapData.zones = cleaned.zones;
+        }
 
         log.info(`[AssetServer] Before update - mapData has graveyards: ${mapData.graveyards ? 'yes' : 'no'}, warps: ${mapData.warps ? 'yes' : 'no'}`);
 

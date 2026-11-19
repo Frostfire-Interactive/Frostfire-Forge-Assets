@@ -5,8 +5,12 @@ import assetCache from "../services/assetCache";
 import zlib from "zlib";
 import crypto from "crypto";
 import os from "os";
-import { ChunkedMapBake, TilesetImages, bakeWorldMap, bakeChunkedWorldMap, type ChunkedMap } from "./worldmap";
-import { loadWorlds, listWorlds, onWorldTilesChanged, readChunkTiles, type World, type WorldTileChange } from "./worldstore";
+import { ChunkedMapBake, TilesetImages, bakeWorldMap, bakeChunkedWorldMap } from "./worldmap";
+import { loadWorlds, listWorlds, onWorldTilesChanged, type World, type WorldTileChange } from "./worldstore";
+import { chunkedMapOf, normalizeInfiniteMap, prepareMap } from "./mapprepare";
+import { MapLoadPool, toBuffer } from "./mapload";
+
+export { normalizeInfiniteMap };
 import { assetsVersion, contentVersion } from "./assetversion";
 import mapChanges, { startMapChanges } from "./mapchanges";
 
@@ -451,23 +455,18 @@ function keepWorldBake(world: World, png: Buffer): void {
   } catch { /* no kept copy */ }
 }
 
-function chunkedMapOf(world: World): ChunkedMap {
-  return {
-    width: world.width,
-    height: world.height,
-    chunkSize: world.chunkSize,
-    tilesets: world.manifest.tilesets ?? [],
-    backgroundcolor: world.manifest.backgroundcolor,
-    layers: world.layers,
-    readChunk: (chunkX, chunkY) => readChunkTiles(world, chunkX, chunkY),
-  };
-}
-
-function bakeWorldCached(world: World, images: TilesetImages): Buffer {
+// The kept copy of a world's image from an earlier start, when it is still the world as it is now
+function keptWorldBake(world: World): Buffer | null {
   const file = worldBakeFile(world);
   try {
     if (fs.existsSync(file)) return fs.readFileSync(file);
   } catch { /* unreadable: bake it */ }
+  return null;
+}
+
+function bakeWorldCached(world: World, images: TilesetImages): Buffer {
+  const kept = keptWorldBake(world);
+  if (kept) return kept;
   const { png } = bakeChunkedWorldMap(chunkedMapOf(world), images);
   keepWorldBake(world, png);
   return png;
@@ -538,32 +537,36 @@ export async function rebakeWorld(world: World, change: WorldTileChange): Promis
   log.info(`Baked the world map of ${world.id} again (${change === "all" ? "the whole world" : `${drawn} chunk(s)`}) in ${(performance.now() - now).toFixed(0)}ms`);
 }
 
-async function loadWorldMaps() {
+async function loadWorldMaps(pool: MapLoadPool) {
   const now = performance.now();
   const mapDir = path.join(assetPath, MAPS_PATH);
   const worldMaps: { name: string; data: string; version: string }[] = [];
-  const maps = (await assetCache.get("maps") as MapData[] | null) ?? [];
-  const images = new TilesetImages(path.join(assetPath, TILESETS_PATH));
+  const entry = (name: string, png: Buffer) => ({ name, data: png.toString("base64"), version: crypto.createHash("sha256").update(png).digest("hex").slice(0, 16) });
   let baked = 0;
-  for (const map of maps) {
-    const name = map.name.replace(/\.json$/i, "");
-    try {
-      const png = bakeWorldMap(map.data, images);
-      worldMaps.push({ name, data: png.toString("base64"), version: crypto.createHash("sha256").update(png).digest("hex").slice(0, 16) });
-      baked++;
-    } catch (e: any) {
-      log.warn(`Could not bake the world map of ${map.name}: ${e?.message ?? e}`);
-    }
+  // Tiled maps: baked by the workers while the maps loaded
+  for (const [name, png] of startupMapBakes) {
+    worldMaps.push(entry(name, png));
+    baked++;
   }
-  // Worlds (modules/worldstore.ts): baked from their packs, a large one several tiles to a pixel
-  for (const world of listWorlds()) {
-    try {
-      const png = bakeWorldCached(world, images);
-      worldMaps.push({ name: world.id, data: png.toString("base64"), version: crypto.createHash("sha256").update(png).digest("hex").slice(0, 16) });
-      baked++;
-    } catch (e: any) {
-      log.warn(`Could not bake the world map of ${world.name}: ${e?.message ?? e}`);
+  startupMapBakes.clear();
+  // Worlds (modules/worldstore.ts): baked from their packs, a large one several tiles to a pixel. One kept from an
+  // earlier start is used as it is; the others are baked each on its own worker, all at once.
+  const worlds = await Promise.all(listWorlds().map(async (world) => {
+    const kept = keptWorldBake(world);
+    if (kept) return { world, png: kept };
+    const result = await pool.run({ kind: "world", worldId: world.id, mapDir, tilesetDir: path.join(assetPath, TILESETS_PATH) });
+    if (!result.ok) {
+      log.warn(`Could not bake the world map of ${world.name}: ${result.error}`);
+      return { world, png: null };
     }
+    const png = toBuffer((result as { png: Uint8Array }).png);
+    keepWorldBake(world, png);
+    return { world, png };
+  }));
+  for (const { world, png } of worlds) {
+    if (!png) continue;
+    worldMaps.push(entry(world.id, png));
+    baked++;
   }
   let fromFiles = 0;
   if (fs.existsSync(mapDir)) {
@@ -604,25 +607,37 @@ export async function registerNewMap(name: string, world?: World): Promise<void>
   }
 }
 
-function loadAllMaps() {
+// World map images of the Tiled maps, baked by the workers as the maps loaded: taken by loadWorldMaps
+const startupMapBakes = new Map<string, Buffer>();
+
+async function loadAllMaps(pool: MapLoadPool) {
   const now = performance.now();
   const mapDir = path.join(assetPath, MAPS_PATH);
-  const maps: MapData[] = [];
+  const tilesetDir = path.join(assetPath, TILESETS_PATH);
 
   if (!fs.existsSync(mapDir)) throw new Error(`Maps directory not found at ${mapDir}`);
 
   const mapFiles = fs.readdirSync(mapDir).filter(f => f.endsWith(".json"));
   if (mapFiles.length === 0) throw new Error("No maps found in the maps directory");
 
-  for (const file of mapFiles) {
-    const map = processMapFile(file);
-    if (map) {
-      maps.push(map);
+  // Read, parsed, compressed, hashed and baked on the workers; kept in the order of the folder
+  const results = await Promise.all(mapFiles.map(file => pool.run({ kind: "map", file, mapDir, tilesetDir })));
+  const maps: MapData[] = [];
+  results.forEach((result, i) => {
+    const file = mapFiles[i]!;
+    if (!result.ok) {
+      log.error(result.error);
+      return;
     }
-  }
+    if (result.kind !== "map") return;
+    maps.push({ name: file, data: result.data, compressed: toBuffer(result.compressed), checksum: result.checksum });
+    log.debug(`Loaded map: ${file} (${result.size} bytes, ${result.compressed.byteLength} compressed)`);
+    if (result.png) startupMapBakes.set(file.replace(/\.json$/i, ""), toBuffer(result.png));
+    else if (result.bakeError) log.warn(`Could not bake the world map of ${file}: ${result.bakeError}`);
+  });
 
   assetCache.add("maps", maps);
-  log.success(`Loaded ${maps.length} map(s) in ${(performance.now() - now).toFixed(2)}ms`);
+  log.success(`Loaded ${maps.length} map(s) in ${(performance.now() - now).toFixed(2)}ms on ${pool.size} worker(s)`);
 
   // The maps that differ from the last run are what the game servers are sent when they connect again (/map-events)
   const listed = startMapChanges(mapDir, maps);
@@ -788,120 +803,15 @@ export function applyChunksWithRebase(
   return { shiftX: netShiftX, shiftY: netShiftY, width: finalWidth, height: finalHeight };
 }
 
-export function normalizeInfiniteMap(mapData: any): void {
-  if (!mapData || mapData.infinite !== true || !Array.isArray(mapData.layers)) return;
-
-  // The map's declared width/height go stale the moment "infinite" is enabled in
-  // Tiled. Derive the true size from the actual painted tiles across all layers
-  // (not the 16-aligned chunk bounds) so we don't report empty padding that would
-  // render as a black border and let the camera pan into nothing. Origin stays at
-  // tile 0,0; any negative-coordinate tiles are clipped.
-  let mapWidth = 0;
-  let mapHeight = 0;
-  for (const layer of mapData.layers) {
-    if (layer.type !== "tilelayer" || !Array.isArray(layer.chunks)) continue;
-    for (const chunk of layer.chunks) {
-      const data = chunk?.data;
-      if (!Array.isArray(data)) continue;
-      const cw = chunk.width || 0;
-      const ch = chunk.height || 0;
-      const cx = chunk.x || 0;
-      const cy = chunk.y || 0;
-      for (let row = 0; row < ch; row++) {
-        for (let col = 0; col < cw; col++) {
-          if (!data[row * cw + col]) continue;
-          const gx = cx + col + 1;
-          const gy = cy + row + 1;
-          if (gx > mapWidth) mapWidth = gx;
-          if (gy > mapHeight) mapHeight = gy;
-        }
-      }
-    }
-  }
-  if (!mapWidth || !mapHeight) return;
-
-  for (const layer of mapData.layers) {
-    if (layer.type !== "tilelayer") continue;
-
-    const flat = new Array(mapWidth * mapHeight).fill(0);
-
-    if (Array.isArray(layer.chunks)) {
-      for (const chunk of layer.chunks) {
-        const data = chunk?.data;
-        if (!Array.isArray(data)) continue;
-        const cw = chunk.width;
-        const ch = chunk.height;
-        const cx = chunk.x;
-        const cy = chunk.y;
-        for (let row = 0; row < ch; row++) {
-          const gy = cy + row;
-          if (gy < 0 || gy >= mapHeight) continue;
-          for (let col = 0; col < cw; col++) {
-            const gx = cx + col;
-            if (gx < 0 || gx >= mapWidth) continue;
-            const val = data[row * cw + col];
-            if (val) flat[gy * mapWidth + gx] = val;
-          }
-        }
-      }
-    }
-
-    layer.data = flat;
-    layer.width = mapWidth;
-    layer.height = mapHeight;
-    layer.startx = 0;
-    layer.starty = 0;
-    delete layer.chunks;
-  }
-
-  mapData.width = mapWidth;
-  mapData.height = mapHeight;
-  // Keep mapData.infinite = true so the flag reaches the client/editor. Re-running
-  // this is safe: once chunks are flattened away the bounds loop finds none and
-  // returns early before touching layer data.
-}
 
 function processMapFile(file: string): MapData | null {
-  const mapDir = path.join(assetPath, MAPS_PATH);
-  const fullPath = path.join(mapDir, file);
-  const parsed = tryParse(fs.readFileSync(fullPath, "utf-8"));
-
-  if (!parsed) {
+  const map = prepareMap(fs.readFileSync(path.join(assetPath, MAPS_PATH, file), "utf-8"));
+  if (!map) {
     log.error(`Failed to parse ${file} as a map`);
     return null;
   }
-
-  normalizeInfiniteMap(parsed);
-
-  // Compute serialized form and checksum after normalizeInfiniteMap so sync comparisons match
-  const jsonString = JSON.stringify(parsed);
-  const compressedData = zlib.gzipSync(jsonString);
-  const checksum = crypto.createHash("sha256").update(jsonString).digest("hex");
-
-  log.debug(`Loaded map: ${file}`);
-  log.debug(`Compressed map: ${file}
-  - Original: ${jsonString.length} bytes
-  - Compressed: ${compressedData.length} bytes
-  - Compression Ratio: ${(jsonString.length / compressedData.length).toFixed(2)}x
-  - Compression Savings: ${(((jsonString.length - compressedData.length) / jsonString.length) * 100).toFixed(2)}%`);
-
-  normalizeInfiniteMap(parsed);
-
-  return {
-    name: file,
-    data: parsed,
-    compressed: compressedData,
-    checksum: checksum,
-  };
-}
-
-function tryParse(data: string): any {
-  try {
-    return JSON.parse(data);
-  } catch (e: any) {
-    log.error(e);
-    return null;
-  }
+  log.debug(`Loaded map: ${file} (${map.size} bytes, ${map.compressed.length} compressed)`);
+  return { name: file, data: map.data, compressed: map.compressed, checksum: map.checksum };
 }
 
 export async function initializeAssets() {
@@ -911,8 +821,13 @@ export async function initializeAssets() {
   await loadIcons();
   await loadAudio();
   await loadAssetVersion();
-  loadAllMaps();
-  await loadWorldMaps();
+  const pool = new MapLoadPool();
+  try {
+    await loadAllMaps(pool);
+    await loadWorldMaps(pool);
+  } finally {
+    pool.close();
+  }
 
   const assetLoadingEndTime = performance.now();
   const totalAssetLoadingTime = (assetLoadingEndTime - assetLoadingStartTime).toFixed(2);

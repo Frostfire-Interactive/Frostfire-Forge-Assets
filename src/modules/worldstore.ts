@@ -97,7 +97,7 @@ function isPositiveInt(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) > 0;
 }
 
-function openWorld(dir: string, id: string): World {
+export function openWorld(dir: string, id: string): World {
   const manifestStamp = stampOf(fs.statSync(path.join(dir, "manifest.json")));
   const manifestBytes = fs.readFileSync(path.join(dir, "manifest.json"));
   const manifest = JSON.parse(manifestBytes.toString("utf-8"));

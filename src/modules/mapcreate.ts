@@ -1,16 +1,3 @@
-/**
- * New, blank maps made from the map editor (USER REQUEST 2026-10-19: "Add support for creating new maps within the
- * editor. Allow defining map size, infinite or not and optionally allow creating .world maps. Each map should be blank
- * and upon creation, warp to them.").
- *
- * Two kinds:
- *  - a map: one Tiled JSON file, <name>.json, as the house maps are made (the same layers, plain tile arrays, every
- *    tile 0), finite or infinite (an infinite one starts at the size asked for and grows as it is painted);
- *  - a world: a <name>.world directory as the map generator writes one (its src/ffworld), every chunk empty: the
- *    manifest, a collision and a no-pvp bitset of zeros, and one pack per 16 x 16 chunks holding no records.
- * The tilesets are the ones asked for, each copied from a map or world that already has it (with its tile properties
- * and animations), else made from the picture's size alone.
- */
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -44,10 +31,6 @@ const OBJECT_LAYERS: Array<{ name: string; visible: boolean; locked?: boolean }>
   { name: "Particles", visible: false },
 ];
 
-/**
- * What is wrong with a request, in words, or null. `taken`: whether a map or world of that name exists already;
- * `images`: the tileset pictures the asset server has.
- */
 export function checkCreateMap(req: any, taken: (name: string) => boolean, images: Set<string>): string | null {
   if (!req || typeof req.name !== "string" || !MAP_NAME_RE.test(req.name)) return "The name may hold lower case letters, digits, - and _ only, up to 48, starting with a letter or digit.";
   if (req.name.endsWith(".world") || taken(req.name)) return `A map named ${req.name} already exists.`;
@@ -76,11 +59,6 @@ export function pngSize(bytes: Uint8Array): { width: number; height: number } | 
   return { width: dv.getUint32(16), height: dv.getUint32(20) };
 }
 
-/**
- * The tilesets of a new map, firstgid set one after another. Each is the fullest definition of its picture found in
- * `known` (the tilesets of the maps and worlds there are: the one with the most tile entries), else one made from the
- * picture's size (`sizeOf`). Returns null with the picture that could not be read.
- */
 export function tilesetDefinitions(files: string[], known: any[], sizeOf: (file: string) => { width: number; height: number } | null): { tilesets: any[] } | { error: string } {
   const out: any[] = [];
   let firstgid = 1;

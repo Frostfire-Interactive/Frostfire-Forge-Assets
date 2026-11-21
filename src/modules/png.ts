@@ -1,6 +1,3 @@
-// Minimal PNG reader / writer for the world map bake (worldmap.ts): no image dependency.
-// Reads non-interlaced PNGs of every colour type (greyscale, RGB, palette, grey + alpha, RGBA; bit depths 1-16,
-// palette transparency via tRNS) into 8-bit RGBA. Writes 8-bit RGB or RGBA.
 import zlib from "zlib";
 
 export interface RGBAImage { width: number; height: number; data: Uint8Array }

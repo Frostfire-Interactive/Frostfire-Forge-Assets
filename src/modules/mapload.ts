@@ -1,5 +1,3 @@
-// The startup worker pool: the maps are made ready and their world map images baked on several threads at once
-// (mapload.worker.ts). The pool lives only while the assets load at start.
 import os from "os";
 import type { MapLoadJob, MapLoadResult } from "./mapload.worker";
 

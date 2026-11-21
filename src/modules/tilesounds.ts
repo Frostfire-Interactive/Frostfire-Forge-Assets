@@ -1,14 +1,3 @@
-/**
- * The footstep sounds set on tiles in the map editor (USER REQUEST 2026-10-19: "a separate tab that allows selecting
- * multiple tiles to share a sound (picked from asset server)").
- *
- * A map keeps its tilesets inside its own file, so a sound written into one map's tileset would reach no other map
- * that draws the same picture, and the map generator writes its own sounds into its maps on every build. The editor's
- * sounds are kept apart instead, in one list for every map: <assets>/tilesounds.json, by tileset picture (the image's
- * file name without its extension, in lower case: "environment") and tile (its id in that tileset). The game client
- * lays the list over the `footstep_sound` tile properties of the map it is on: a tile in the list sounds as the list
- * says, "" being no sound at all; any other tile keeps its map's own.
- */
 import fs from "fs";
 import path from "path";
 import { getAssetsPath } from "./assetloader";

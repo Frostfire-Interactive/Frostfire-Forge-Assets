@@ -1,5 +1,3 @@
-// Map preparation shared by the main thread and the startup workers (mapload.worker.ts): nothing here touches the
-// asset cache, so a worker can import it.
 import zlib from "zlib";
 import crypto from "crypto";
 import { readChunkTiles, type World } from "./worldstore";
@@ -8,11 +6,6 @@ import type { ChunkedMap } from "./worldmap";
 export function normalizeInfiniteMap(mapData: any): void {
   if (!mapData || mapData.infinite !== true || !Array.isArray(mapData.layers)) return;
 
-  // The map's declared width/height go stale the moment "infinite" is enabled in
-  // Tiled. Derive the true size from the actual painted tiles across all layers
-  // (not the 16-aligned chunk bounds) so we don't report empty padding that would
-  // render as a black border and let the camera pan into nothing. Origin stays at
-  // tile 0,0; any negative-coordinate tiles are clipped.
   let mapWidth = 0;
   let mapHeight = 0;
   for (const layer of mapData.layers) {
@@ -73,9 +66,6 @@ export function normalizeInfiniteMap(mapData: any): void {
 
   mapData.width = mapWidth;
   mapData.height = mapHeight;
-  // Keep mapData.infinite = true so the flag reaches the client/editor. Re-running
-  // this is safe: once chunks are flattened away the bounds loop finds none and
-  // returns early before touching layer data.
 }
 
 /** A map file's text made ready to serve: parsed and flattened, then its gzip and its checksum (over the flattened JSON). */

@@ -1,7 +1,3 @@
-// World map bake (the game's full-map view, M): one pixel per tile, each tile's alpha-weighted average colour from the
-// map's own tilesets, composited over the visible tile layers in order. Baked in memory at startup for every map
-// (assetloader.ts loadWorldMaps), so a new or edited map never needs a hand-baked <map>.worldmap.png. Same algorithm as
-// the Map Generation project's worldmap.ts.
 import fs from "fs";
 import path from "path";
 import { decodePng, encodePng, type RGBAImage } from "./png";
@@ -108,20 +104,12 @@ export function chunkedMapScale(map: Pick<ChunkedMap, "width" | "height" | "chun
   return scale;
 }
 
-// The same bake as bakeWorldMap for a map that is never held whole: read chunk by chunk, and for a large world
-// several tiles to a pixel (each pixel the mean of the tiles it covers), so the 10240 x 10240 continent comes out
-// 2560 x 2560 instead of an image no browser should have to hold. At one tile to a pixel the image is the one
-// bakeWorldMap gives for the same map.
 export function bakeChunkedWorldMap(map: ChunkedMap, images: TilesetImages): { png: Buffer; scale: number } {
   const bake = new ChunkedMapBake(map, images);
   bake.drawAll();
   return { png: bake.png(), scale: bake.scale };
 }
 
-/**
- * The image of a chunked map, kept as pixels so that chunks can be drawn again one by one: after a save only the
- * changed chunks are baked again (assetloader.ts), not the whole world.
- */
 export class ChunkedMapBake {
   readonly scale: number;
   readonly width: number;

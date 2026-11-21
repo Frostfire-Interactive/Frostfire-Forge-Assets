@@ -5,20 +5,6 @@ import crypto from "crypto";
 import log from "./logger";
 import { cleanZones, type MapZone } from "./zones";
 
-// World maps: a map too large to hold as one Tiled file (the 10240 x 10240 continent) lives in the maps folder as a
-// directory <id>.world/ written by the map generator:
-//
-//   manifest.json            size, tile size, tilesets, layer list, objects
-//   collision.bits           one bit per tile, read by the game server only
-//   nopvp.bits
-//   packs/r<px>_<py>.ffp      the tiles, packChunks x packChunks chunks per file, each chunk stored on its own
-//
-// A world is served under the same name a Tiled map would have (<id>.json) and /map-chunk answers for it with exactly
-// the JSON a Tiled map gives, so the client cannot tell the two apart. Nothing of a world is held in memory but its
-// manifest and the table of each pack that has been read; tiles are read from disk chunk by chunk.
-//
-// Worlds are kept here, not in the asset cache: they are read only and local to this process.
-
 const PACK_MAGIC = 0x50574646; // "FFWP"
 const PACK_HEADER_BYTES = 64;
 const TABLE_ENTRY_BYTES = 32;
@@ -70,8 +56,6 @@ export interface World {
   fileHashes: Record<WorldSyncFile, string>;
   // The table of each pack read so far, with the file's size and time when it was read
   packTables: Map<string, PackTable>;
-  // manifest.json's size and time when it was read: a change means another program (the Tiled extension, the map
-  // generator) rewrote the world, and it is read again
   manifestStamp: FileStamp;
 }
 
@@ -179,8 +163,6 @@ function tilesChanged(world: World, change: WorldTileChange): void {
   }
 }
 
-// The chunks of the packs whose hash differs between two manifests of a world, or "all" when more than the packs
-// changed (layers, tilesets, size)
 function changedChunks(before: any, after: World): WorldTileChange {
   const same = (key: string) => JSON.stringify(before?.[key]) === JSON.stringify(after.manifest[key]);
   if (!same("layers") || !same("tilesets") || !same("width") || !same("height") || !same("chunkSize") || !same("packChunks")) return "all";
@@ -196,9 +178,6 @@ function changedChunks(before: any, after: World): WorldTileChange {
   return chunks;
 }
 
-// Reads a world again when its manifest changed on disk since it was read. The world object is updated in place, so
-// everything that holds it sees the new state; its pack tables are dropped and read again when needed. A manifest
-// that cannot be read keeps the loaded copy.
 function refreshWorld(world: World): void {
   let stamp: FileStamp;
   try {
@@ -223,8 +202,6 @@ function packPath(dir: string, px: number, py: number): string {
   return path.join(dir, "packs", `r${px}_${py}.ffp`);
 }
 
-// Reads every <id>.world directory of the maps folder. A world that cannot be read, or whose name a Tiled map
-// already has, is skipped with an error in the log; the Tiled maps are never affected.
 export function loadWorlds(mapDir: string, tiledMapNames: Set<string>): void {
   const now = performance.now();
   worlds.clear();
@@ -314,8 +291,6 @@ function readPackTable(world: World, fd: number, px: number, py: number): PackEn
   return entries;
 }
 
-// The tiles of one chunk, one array of chunkSize * chunkSize gids per tile layer (by tileIndex).
-// A chunk nothing was painted on has no record in its pack: all zero.
 export function readChunkTiles(world: World, chunkX: number, chunkY: number): number[][] {
   const area = world.chunkSize * world.chunkSize;
   const tiles: number[][] = [];
@@ -384,13 +359,6 @@ export function readChunkTiles(world: World, chunkX: number, chunkY: number): nu
   return tiles;
 }
 
-// ---------------------------------------------------------------------------------------------------- editor saves
-//
-// A save from the tile editor replaces whole chunks: the layers it sends, with the chunk's other layers kept. Each
-// touched pack is written again (its other records copied as they are), then the two bitsets, then the manifest,
-// each to a .tmp file renamed over the old one. The byte layout is the map generator's (its src/ffworld), so a
-// saved world still verifies there.
-
 const ZLIB_LEVEL = 6;
 const BITS_HEADER_BYTES = 32;
 
@@ -455,11 +423,6 @@ function writeFileAtomic(file: string, data: Uint8Array): void {
 
 export class WorldSaveError extends Error {}
 
-/**
- * Applies edited chunks to a world. `chunks`: what the tile editor sends for any map ({ chunkX, chunkY, width,
- * height, layers: [{ name, data }] }). Everything is checked before anything is written; a chunk that comes out the
- * same as it is on disk is not written. Returns the chunks that changed.
- */
 export function saveWorldChunks(world: World, chunks: any[]): { chunkX: number; chunkY: number }[] {
   // the save builds on the world as it is on disk, not as it was when last read
   refreshWorld(world);
@@ -572,8 +535,6 @@ function layerRoles(world: World): { collision: number[]; nopvp: number[] } {
   return roles;
 }
 
-// Brings the bitsets and the manifest in line with packs that are already on disk: the bitset blocks of `changed`
-// chunks from their tiles, the manifest's hash and revision of each pack in `packs`, a new world revision.
 function commitWorld(world: World, changed: { chunkX: number; chunkY: number; tiles: number[][] }[], packs: { key: string; px: number; py: number; packHash: bigint; packRev: number }[]): void {
   const cs = world.chunkSize, blockBytes = (cs * cs) >>> 3, roles = layerRoles(world);
   const bitsets = (["collision", "nopvp"] as const).map(role => {
@@ -610,13 +571,6 @@ function writeManifest(world: World, bitsetHashes?: { "collision.bits": string; 
   world.checksum = world.fileHashes["manifest.json"];
 }
 
-/**
- * The editor's graveyards and warps of a world, written into its manifest as the objects of its Graveyards and Warps
- * layers (the game server reads them from there like any map's). Each list is the whole list, in the shape the game
- * server holds it: graveyards { name, position: { x, y } }, warps { name, map, x, y, position: { x, y },
- * size: { width, height } }. A list left out is kept as it is. Zones (modules/zones.ts) replace manifest.zones whole,
- * generated ones included: the editor sends them back with their own keys.
- */
 export function saveWorldProperties(world: World, graveyards?: any, warps?: any, zones?: unknown): void {
   // the save builds on the manifest as it is on disk, so objects saved there by another program are kept
   refreshWorld(world);
@@ -678,12 +632,6 @@ export function saveWorldProperties(world: World, graveyards?: any, warps?: any,
   writeManifest(world);
 }
 
-/**
- * A save stopped between its packs and its manifest (the server died) leaves packs the manifest does not know and
- * bitsets that may be of either state. Found at load by each pack's own header against the manifest; mended by
- * taking the packs as they are: their chunks' bitset blocks are rebuilt from their tiles and the manifest follows.
- * Returns the packs mended (none for a world in order).
- */
 export function mendWorld(world: World): number {
   const pc = world.packChunks, stale: { key: string; px: number; py: number; packHash: bigint; packRev: number }[] = [];
   for (const listed of world.manifest.packs) {
@@ -698,8 +646,6 @@ export function mendWorld(world: World): number {
     try { return hex64(readAt(fd, BITS_HEADER_BYTES, 0).readBigUInt64LE(16)) !== world.manifest.bitsets?.[role]?.hash; } finally { fs.closeSync(fd); }
   });
   if (stale.length === 0 && !bitsStale) return 0;
-  // bitsets ahead of the manifest with every pack known: the stop came after the last pack; nothing says which
-  // chunks changed, so every chunk's blocks are rebuilt
   const packs = stale.length ? stale : world.manifest.packs.map((p: any) => ({ key: `${p.px}_${p.py}`, px: p.px, py: p.py, packHash: BigInt(`0x${p.packHash}`), packRev: p.packRev }));
   const chunks: { chunkX: number; chunkY: number; tiles: number[][] }[] = [];
   for (const pack of packs) {
@@ -712,8 +658,6 @@ export function mendWorld(world: World): number {
   return packs.length;
 }
 
-// One chunk of a world as the JSON string buildMapChunk gives for a Tiled map: same keys, same layer order, same
-// zIndex. Returns null for invalid chunk parameters (a world only has chunks of its own chunk size).
 export function buildWorldChunk(world: World, chunkX: number, chunkY: number, chunkSize: number): string | null {
   if (!Number.isInteger(chunkX) || !Number.isInteger(chunkY) || chunkSize !== world.chunkSize) return null;
 

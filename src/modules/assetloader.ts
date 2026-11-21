@@ -26,9 +26,6 @@ function getAssetPath(): string {
       // Absolute path - use as-is
       resolvedPath = customAssetPath;
     } else {
-      // Relative path - resolve from current working directory
-      // In Docker, cwd is /app, so relative paths work correctly
-      // Locally, cwd is project root, so relative paths also work
       resolvedPath = path.resolve(process.cwd(), customAssetPath);
     }
 
@@ -72,9 +69,6 @@ async function loadTilesets() {
   const now = performance.now();
   const tilesets = [] as TilesetData[];
   const tilesetDir = path.join(assetPath, TILESETS_PATH);
-  // .json = Tiled tileset definitions; images (.png, ...) are fetched by the
-  // browser client via /tileset?name=<image> (gateway map.ts loadTilesets),
-  // so they must be cached too now that serving is cache-only.
   const allowedExtensions = [".json", ".png", ".jpg", ".jpeg", ".webp"];
 
   if (!fs.existsSync(tilesetDir)) {
@@ -100,8 +94,6 @@ async function loadTilesets() {
   - Compression Ratio: ${ratio}x
   - Compression Savings: ${savings}%`);
 
-    // version: a content hash of the file, the /tileset ETag (a tileset edited in place under the same name gets a new
-    // one, so the browser's revalidation picks the new image up after a restart)
     tilesets.push({ name: file, data: compressedData, version: crypto.createHash("sha256").update(tilesetData).digest("hex").slice(0, 16) });
   });
 
@@ -415,16 +407,6 @@ async function loadIcons() {
   log.success(`Loaded ${icons.length} icon(s) in ${(performance.now() - now).toFixed(2)}ms`);
 }
 
-/**
- * Baked full-map images (maps/<map>.worldmap.png, one pixel per tile; the map generator writes them beside the map):
- * the game's world map view. Cached as raw PNG bytes (base64) with a version (file mtime) for revalidation.
- */
-// The world map images (the game's full-map view, M): baked in memory at startup for every loaded map
-// (modules/worldmap.ts), so they always match the maps and tilesets on disk. A hand-baked <map>.worldmap.png in
-// the maps folder is only used for a map whose bake failed. Nothing is written to disk.
-// A world's bake takes seconds (the 10240 x 10240 continent: about 10), so the image is kept between starts in the
-// system's temp folder, under a name made of everything it depends on: the world's manifest (which names every
-// pack's content), its tileset images and this bake's version. Nothing is written to the assets folder.
 const WORLD_BAKE_VERSION = 1;
 const worldBakeDir = () => path.join(os.tmpdir(), "frostfire-forge-assets", "worldmaps");
 
@@ -440,8 +422,6 @@ function worldBakeFile(world: World): string {
   return path.join(worldBakeDir(), `${world.id}-${key.digest("hex").slice(0, 24)}.png`);
 }
 
-// Keeps a world's image for the next start, in place of the copy of an earlier build. The kept copy is only a
-// shortcut: a failure to write it changes nothing.
 function keepWorldBake(world: World, png: Buffer): void {
   const prefix = `${world.id}-`, file = worldBakeFile(world);
   try {
@@ -472,9 +452,6 @@ function bakeWorldCached(world: World, images: TilesetImages): Buffer {
   return png;
 }
 
-// After a world's tiles changed (an editor save, or a save by another program such as the Tiled extension), its
-// image is baked again: only the changed chunks are drawn, over the image as it was, so a save of a few chunks takes
-// moments even on the 10240 x 10240 continent. Changes that come close together are baked once.
 const worldBakes = new Map<string, ChunkedMapBake>();
 const pendingBakes = new Map<string, { change: WorldTileChange; timer: ReturnType<typeof setTimeout> }>();
 const WORLD_REBAKE_DELAY_MS = 500;
@@ -549,8 +526,6 @@ async function loadWorldMaps(pool: MapLoadPool) {
     baked++;
   }
   startupMapBakes.clear();
-  // Worlds (modules/worldstore.ts): baked from their packs, a large one several tiles to a pixel. One kept from an
-  // earlier start is used as it is; the others are baked each on its own worker, all at once.
   const worlds = await Promise.all(listWorlds().map(async (world) => {
     const kept = keptWorldBake(world);
     if (kept) return { world, png: kept };
@@ -582,10 +557,6 @@ async function loadWorldMaps(pool: MapLoadPool) {
   log.success(`Baked ${baked} world map image(s)${fromFiles ? ` (+${fromFiles} from file)` : ""} in ${(performance.now() - now).toFixed(2)}ms`);
 }
 
-/**
- * A map just written to the maps folder (modules/mapcreate.ts): a Tiled map "<name>.json", or a world taken in by
- * worldstore's addWorld first. It joins the maps cache and gets its world map image, as the maps found at start do.
- */
 export async function registerNewMap(name: string, world?: World): Promise<void> {
   const images = new TilesetImages(path.join(assetPath, TILESETS_PATH));
   let png: Buffer | null = null;
@@ -647,17 +618,6 @@ async function loadAllMaps(pool: MapLoadPool) {
   loadWorlds(mapDir, new Set(mapFiles));
 }
 
-// Tiled stores "infinite" maps as per-layer `chunks` arrays instead of a flat
-// `data` array. The /map-chunk endpoint slices from a flat `layer.data` sized
-// width*height, so flatten infinite maps in place. Tiles outside the declared
-// map bounds are clipped. This must run AFTER the raw-JSON checksum is computed
-// so map-sync between engine and asset server stays stable.
-// Apply edited chunks to a finite map: grow the flat storage to fit the edits,
-// then (for infinite maps) trim the result back to the tight content bounds so
-// empty expansion isn't persisted. Existing tiles and object-group objects are
-// shifted by the actual amount the content moved. `bounds` is the editor's claimed
-// extent (minTileX/minTileY <= 0, width/height exclusive max). Returns the net
-// world shift (in tiles) and the final map dimensions.
 export function applyChunksWithRebase(
   mapData: any,
   chunks: any[],
@@ -734,10 +694,6 @@ export function applyChunksWithRebase(
   let finalWidth = provWidth;
   let finalHeight = provHeight;
 
-  // Trim empty expansion (infinite maps only): shrink back to the tight content
-  // bounds. Left/up is only trimmed up to the expansion amount, so intentional
-  // empty borders at the original origin are preserved. Use the client's infinite
-  // flag when provided (the in-memory map's flag can be stale).
   if ((bounds?.infinite ?? mapData.infinite) === true) {
     let tMinX = Infinity, tMinY = Infinity, tMaxX = -1, tMaxY = -1;
     for (const layer of mapData.layers) {
@@ -834,10 +790,6 @@ export async function initializeAssets() {
   log.success(`✔ All assets loaded successfully in ${totalAssetLoadingTime}ms`);
 }
 
-/**
- * The asset version served at /asset-version: one hash over the sprites, icons and sprite sheets (template and image)
- * read at startup. The gateway's service worker keeps those cache-first and drops its copies when this changes.
- */
 async function loadAssetVersion() {
   const sprites = (await assetCache.get("sprites") as SpriteData[] | null) ?? [];
   const icons = (await assetCache.get("icons") as IconData[] | null) ?? [];

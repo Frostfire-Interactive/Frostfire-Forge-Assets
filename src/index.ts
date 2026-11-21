@@ -56,13 +56,8 @@ function getAudioMimeType(fileName: string): string {
   return AUDIO_MIME_TYPES[path.extname(fileName).toLowerCase()] || "application/octet-stream";
 }
 
-// A world (modules/worldstore.ts) is saved chunk by chunk (/save-map-chunks, /save-map-properties), never replaced
-// whole.
 const WORLD_READ_ONLY = "A world cannot be replaced whole";
 
-// Full-detail pieces of a world's map image (/worldmap?name&rx&ry), each WORLD_MAP_REGION tiles a side and one
-// pixel per tile, baked on request and kept while the world stays as it is. The client asks by the same size
-// (worldmap.ts DETAIL_TILES).
 const WORLD_MAP_REGION = 1024;
 const WORLD_MAP_PIECES_MAX = 64;
 const worldMapPieces = new Map<string, Buffer>();
@@ -72,10 +67,6 @@ function acceptsGzip(req: Request): boolean {
   return (req.headers.get("accept-encoding") || "").includes("gzip");
 }
 
-// Cache of precomputed gzip-compressed map chunk payloads. /map-chunk is the
-// highest-volume browser endpoint (every client fetches dozens of chunks per
-// map load), and each miss costs layer slicing + JSON.stringify + gzipSync.
-// Keyed by map name + checksum so map edits invalidate naturally on write.
 const chunkCache = new Map<string, Uint8Array>();
 const CHUNK_CACHE_MAX_ENTRIES = 10000;
 
@@ -99,8 +90,6 @@ function clearChunkCacheForMap(mapName: string) {
   }
 }
 
-// Serialize one map chunk (tile layers sliced from the flat layer.data arrays)
-// to a JSON string. Returns null for invalid chunk parameters.
 function buildMapChunk(mapData: any, chunkX: number, chunkY: number, chunkSize: number): string | null {
   if (!mapData || !Array.isArray(mapData.layers) || !Number.isInteger(chunkX) || !Number.isInteger(chunkY) || !Number.isInteger(chunkSize) || chunkSize <= 0) {
     return null;
@@ -153,8 +142,6 @@ function buildMapChunk(mapData: any, chunkX: number, chunkY: number, chunkSize: 
   return JSON.stringify(chunk);
 }
 
-// Cache keys are flat names (no separators), so anything containing a path
-// separator, parent traversal, or null byte is never valid.
 function isUnsafeAssetName(name: string): boolean {
   const trimmed = name.trim();
   return trimmed === "" || trimmed.includes("\0") || trimmed.includes("..") || trimmed.includes("/") || trimmed.includes("\\");
@@ -171,10 +158,6 @@ function decodeCachedAudio(data: string): Buffer {
   return zlib.gunzipSync(Buffer.from(data, "base64"));
 }
 
-// Fallback icon served when a requested icon/sprite image does not exist.
-// Served from the startup cache (the "missing_icon" entry of the icons cache).
-// The X-Asset-Fallback header lets clients detect the fallback and opt out
-// of rendering it (e.g. spell projectiles).
 async function serveMissingIcon(): Promise<Response> {
   try {
     const icons = await assetCache.get("icons") as any[] | null;
@@ -185,10 +168,6 @@ async function serveMissingIcon(): Promise<Response> {
         status: 200,
         headers: {
           "Content-Type": "image/png",
-          // Short TTL rather than no-cache: the placeholder is one small static
-          // image requested once per missing asset, so no-cache meant every
-          // missing sprite re-fetched it on every render. A few minutes still
-          // lets a genuinely-added asset show up quickly.
           "Cache-Control": "public, max-age=300",
           "X-Asset-Fallback": "missing_icon",
           "Access-Control-Expose-Headers": "X-Asset-Fallback",
@@ -229,11 +208,6 @@ function parseRangeHeader(range: string | null, size: number): { start: number; 
   return { start, end };
 }
 
-// Serve a raw audio buffer with correct MIME type, ETag/conditional GET,
-// and Range (206 Partial Content) support so <audio> elements can seek.
-// Revalidated on every use (no-cache + ETag = the file's content hash): a sound
-// replaced under the same name is picked up after a restart, an unchanged one
-// costs a 304.
 function serveAudioBuffer(req: Request, fileName: string, data: Buffer, version: string): Response {
   const mime = getAudioMimeType(fileName);
   const size = data.length;
@@ -276,8 +250,6 @@ const routes = {
   "/status": {
     GET: () => new Response(JSON.stringify({ status: "OK" }), { status: 200, headers: CORS_HEADERS })
   },
-  // One hash over the sprites, icons and sprite sheets read at startup. The gateway's service worker keeps those
-  // cache-first and drops its copies from this server when the hash changes.
   "/asset-version": {
     GET: async () => new Response(JSON.stringify({ version: (await assetCache.get("assetVersion")) ?? "" }), {
       status: 200,
@@ -308,9 +280,6 @@ const routes = {
         const cachedTilesets = await assetCache.get("tilesets") as any[] | null;
         const cachedTileset = cachedTilesets?.find((t: any) => t.name === name);
         if (cachedTileset?.data) {
-          // Revalidated on every load (no-cache + ETag = the file's content hash): a tileset edited in place under the same
-          // name is picked up after a restart, an unchanged one costs a 304. The gateway's service worker no longer keeps
-          // /tileset (its cache-first copy served the old image on every normal reload).
           const etag = `"${cachedTileset.version ?? ""}"`;
           const headers = {
             "Content-Type": "application/json",
@@ -357,8 +326,6 @@ const routes = {
       }
 
       try {
-        // Get map from cache. A world (modules/worldstore.ts) answers under the
-        // same name with the same chunk JSON, read from its packs on disk.
         const mapFile = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
         const world = getWorld(mapFile);
         const maps = world ? null : await assetCache.get("maps") as any[];
@@ -377,8 +344,6 @@ const routes = {
 
         const wantGzip = acceptsGzip(req);
 
-        // Serve precomputed gzip payload when available (browser fetch
-        // transparently decompresses Content-Encoding: gzip).
         if (wantGzip) {
           const cacheKey = getChunkCacheKey(mapFile, map.checksum, chunkX, chunkY, chunkSize);
           const cachedChunk = chunkCache.get(cacheKey);
@@ -452,8 +417,6 @@ const routes = {
         if (!maps || maps.length === 0) {
           return new Response(JSON.stringify({ success: true, outdatedMaps: [], maps: [], changes }), { status: 200, headers: CORS_HEADERS });
         }
-        // Every map held here, by name. The game server removes local maps that
-        // are not in this list, so its folder stays a copy of this one.
         const mapNames = maps.map((map) => map.name);
         const outdatedMaps: any[] = [];
         for (const map of maps) {
@@ -467,9 +430,6 @@ const routes = {
         // A game server compares every map at start and after a restart here: only a compare that finds something is worth a line
         if (outdatedMaps.length > 0) log.info(`[AssetServer] Map sync for ${serverId}: ${outdatedMaps.length} outdated maps`);
         else log.debug(`[AssetServer] Map sync for ${serverId}: up to date`);
-        // Outdated maps carry full map data - this response can be megabytes.
-        // gzip cuts it 80-90%; Bun's fetch on the game server decompresses
-        // transparently, so no consumer changes are needed.
         const payload = JSON.stringify({ success: true, outdatedMaps, maps: mapNames, changes });
         if (acceptsGzip(req)) {
           return new Response(zlib.gzipSync(payload), {
@@ -488,8 +448,6 @@ const routes = {
       }
     }
   },
-  // The maps saved here since the place the game server was last told (modules/mapchanges.ts), for a game server
-  // that polls (an engine older than /map-events): only the maps that changed are sent, never a comparison of every map
   "/map-changes": {
     POST: async (req: Request) => {
       try {
@@ -513,9 +471,6 @@ const routes = {
       }
     }
   },
-  // The changes a game server follows while it runs (modules/mapchanges.ts mapEventStream): the maps changed since its
-  // place, then each map saved here and each world change as it is made, one JSON object per line. The asset server
-  // pushes; the game server makes no request until the connection ends (a restart here), then connects again.
   "/map-events": {
     POST: async (req: Request) => {
       try {
@@ -539,10 +494,6 @@ const routes = {
       }
     }
   },
-  // Worlds (modules/worldstore.ts) are too large for /map-checksums, which
-  // answers with whole maps. The game server asks for the list, then for each
-  // file it has no current copy of: the manifest and the two bitsets, never
-  // the tiles.
   "/world-list": {
     POST: async (req: Request) => {
       try {
@@ -643,8 +594,6 @@ const routes = {
         const maps = (await assetCache.get("maps")) as any[] || [];
         const mapFile = mapName.endsWith(".json") ? mapName : `${mapName}.json`;
 
-        // A world (modules/worldstore.ts) has a fixed size and is saved chunk by
-        // chunk into its packs: nothing of it is held or rewritten whole.
         const world = getWorld(mapFile);
         if (world) {
           try {
@@ -667,8 +616,6 @@ const routes = {
           return new Response(JSON.stringify({ error: "Map not found" }), { status: 404, headers: CORS_HEADERS });
         }
 
-        // Update chunks in map data, growing / re-basing the origin for
-        // infinite-map expansion as needed.
         const mapData = maps[mapIndex].data;
         applyChunksWithRebase(mapData, chunks, bounds);
 
@@ -755,8 +702,6 @@ const routes = {
         // Update map data with graveyards and warps
         const mapData = maps[mapIndex].data;
 
-        // Zones (modules/zones.ts) live in a top-level "zones" key in tiles; a list is the whole list, an empty one
-        // removes them all. Checked before anything is changed, so a bad list leaves the map as it was.
         if (zones !== undefined) {
           const cleaned = cleanZones(zones, Number(mapData.width) || 0, Number(mapData.height) || 0);
           if ("error" in cleaned) {
@@ -1019,8 +964,6 @@ const routes = {
           return serveMissingIcon();
         }
 
-        // Revalidated on every use (no-cache + ETag = the PNG's content hash): a sprite replaced under the same name is
-        // picked up after a restart. The gateway's service worker keeps it cache-first until /asset-version changes.
         return revalidated(req, entry.version, {
           "Content-Type": "image/png",
           "Access-Control-Allow-Origin": "*",
@@ -1045,8 +988,6 @@ const routes = {
         return new Response(JSON.stringify({ error: "Invalid map name" }), { status: 400, headers: CORS_HEADERS });
       }
       try {
-        // A piece of a world at full detail (rx, ry: which region of WORLD_MAP_REGION tiles), for the map view
-        // zoomed in: a world's whole image is several tiles to a pixel. Baked when first asked for.
         if (url.searchParams.has("rx") || url.searchParams.has("ry")) {
           const world = getWorld(key);
           const rx = Number(url.searchParams.get("rx")), ry = Number(url.searchParams.get("ry"));
@@ -1188,8 +1129,6 @@ const routes = {
           });
         }
 
-        // Serve from the startup cache only (stored as base64 gzip).
-        // Accepts names with or without extension (e.g. "theme", "theme.mp3").
         const cached = await assetCache.get("audio") as any[] | null;
         const stemOf = (n: string) => n.replace(/\.[^.]*$/, "").toLowerCase();
         const entry = cached?.find((a: any) =>
@@ -1219,8 +1158,6 @@ const routes = {
       return (routes["/audio"] as any).GET(req);
     }
   },
-  // The footstep sounds the map editor sets on tiles (modules/tilesounds.ts): read by every game client, written by
-  // the game server for an admin
   "/tile-sounds": {
     GET: async () => {
       try {
@@ -1372,8 +1309,6 @@ const routes = {
           });
         }
 
-        // Equipment sheets are strips of frames; editors show the matching item
-        // icon instead when one exists ("wooden staff" -> "wooden_staff").
         const icons = (await assetCache.get("icons") as any[]) || [];
         const iconNames = new Set(icons.map((i: any) => String(i.name).toLowerCase()));
         const iconFor = (name: string): string | null => {
@@ -1464,9 +1399,6 @@ Bun.serve({
       });
     }
 
-    // All assets are served from the startup cache via the routes above -
-    // there is intentionally no static file fallback to disk.
-    // Unknown routes redirect to homepage
     return Response.redirect("/", 301);
   },
 });

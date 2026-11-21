@@ -1,8 +1,3 @@
-// Zones: named areas drawn on a map (map editor, "Zones" layer) or written by the world generator. A player who
-// walks into one sees its text and hears its music. A world keeps them in manifest.zones, a plain Tiled map in a
-// top-level "zones" key. Every number is in tiles. This is a copy of the game server's rules
-// (Frostfire-Forge/src/modules/zones.ts): change both together.
-
 export interface MapZone {
   name: string;
   /** The words shown on entering, when they differ from the name. */
@@ -50,11 +45,6 @@ function ringArea(ring: number[][]): number {
   return Math.abs(twice) / 2;
 }
 
-/**
- * A zone's rings with every ring that lies inside another one left out. A ring inside another would be a hole (a
- * point is inside when an odd number of rings surround it), so this fills the holes. Rings that lie apart are kept,
- * in their order.
- */
 export function fillHoles(outline: number[][][]): number[][][] {
   const largestFirst = outline.map((_, i) => i).sort((a, b) => ringArea(outline[b]!) - ringArea(outline[a]!));
   const kept: number[] = [];

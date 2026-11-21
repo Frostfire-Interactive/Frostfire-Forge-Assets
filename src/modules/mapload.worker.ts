@@ -1,5 +1,3 @@
-// A startup worker (modules/mapload.ts): makes a map ready to serve and bakes its world map image, or bakes a
-// world's image, off the main thread. Each worker reads the tileset images it needs itself.
 import fs from "fs";
 import path from "path";
 import { TilesetImages, bakeWorldMap, bakeChunkedWorldMap } from "./worldmap";

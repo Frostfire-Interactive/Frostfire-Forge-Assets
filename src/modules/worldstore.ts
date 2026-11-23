@@ -571,7 +571,94 @@ function writeManifest(world: World, bitsetHashes?: { "collision.bits": string; 
   world.checksum = world.fileHashes["manifest.json"];
 }
 
-export function saveWorldProperties(world: World, graveyards?: any, warps?: any, zones?: unknown): void {
+const CHEST_RESET_MAX_MIN = 1440;
+const wholeIn = (value: unknown, min: number, max = Infinity): number | null => {
+  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof n === "number" && Number.isInteger(n) && n >= min && n <= max ? n : null;
+};
+const finiteNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+export type SavedChest = { name: string; lootTableId: number; resetMinutes: number; x: number; y: number };
+/**
+ * kind dungeon: dungeonId (null when linked to none); kind teleport: target. Mirror other side defaults on. returnOf
+ * is set only on a return portal (a teleport's way back, or a dungeon's exit on its map): its source's map and name.
+ */
+export type SavedPortal = {
+  name: string; kind: "dungeon" | "teleport"; dungeonId: number | null; mirror: boolean; target: { map: string; x: number; y: number } | null;
+  returnOf: { map: string; name: string } | null;
+  x: number; y: number; width: number; height: number;
+};
+
+export function cleanChestObjects(raw: unknown): SavedChest[] {
+  if (!Array.isArray(raw)) throw new WorldSaveError("chests must be a list");
+  return raw.map((c: any) => {
+    const lootTableId = wholeIn(c?.lootTableId, 1);
+    if (lootTableId === null) throw new WorldSaveError(`chest ${c?.name}: needs a loot table`);
+    const resetMinutes = wholeIn(c?.resetMinutes, 1, CHEST_RESET_MAX_MIN);
+    if (resetMinutes === null) throw new WorldSaveError(`chest ${c?.name}: reset must be 1 to ${CHEST_RESET_MAX_MIN} minutes`);
+    if (!finiteNum(c?.position?.x) || !finiteNum(c?.position?.y)) throw new WorldSaveError(`chest ${c?.name}: has no position`);
+    return { name: String(c?.name ?? ""), lootTableId, resetMinutes, x: c.position.x, y: c.position.y };
+  });
+}
+
+export function cleanPortalObjects(raw: unknown): SavedPortal[] {
+  if (!Array.isArray(raw)) throw new WorldSaveError("dungeon portals must be a list");
+  return raw.map((p: any) => {
+    const kind = p?.kind ?? "dungeon";
+    if (kind !== "dungeon" && kind !== "teleport") throw new WorldSaveError(`dungeon portal ${p?.name}: kind must be dungeon or teleport`);
+    const dungeonId = kind === "dungeon" && p?.dungeonId != null ? wholeIn(p.dungeonId, 1) : null;
+    if (kind === "dungeon" && p?.dungeonId != null && dungeonId === null) throw new WorldSaveError(`dungeon portal ${p?.name}: needs a dungeon`);
+    let target: SavedPortal["target"] = null;
+    if (kind === "teleport") {
+      const t = p?.target;
+      if (typeof t?.map !== "string" || !t.map.trim() || !finiteNum(t?.x) || !finiteNum(t?.y) || t.x < 0 || t.y < 0) throw new WorldSaveError(`dungeon portal ${p?.name}: needs a map and a place to lead to`);
+      target = { map: t.map.trim(), x: Math.floor(t.x), y: Math.floor(t.y) };
+    }
+    const link = p?.returnOf;
+    const returnOf = typeof link?.map === "string" && link.map.trim() && typeof link?.name === "string" && link.name.trim()
+      ? { map: link.map.trim().replace(/\.json$/, ""), name: link.name.trim() } : null;
+    const mirror = !(p?.mirror === false || p?.mirror === "false");
+    if (!finiteNum(p?.position?.x) || !finiteNum(p?.position?.y)) throw new WorldSaveError(`dungeon portal ${p?.name}: has no position`);
+    if (!finiteNum(p?.size?.width) || !finiteNum(p?.size?.height) || p.size.width < 1 || p.size.height < 1) throw new WorldSaveError(`dungeon portal ${p?.name}: needs a size of 1 or more`);
+    return { name: String(p?.name ?? ""), kind, dungeonId, mirror, target, returnOf, x: p.position.x, y: p.position.y, width: p.size.width, height: p.size.height };
+  });
+}
+
+/** A summoning stone: x, y its foot (x the middle, y the ground line), and its glow as #rrggbb in lower case. */
+export type SavedStone = { name: string; glowColor: string; x: number; y: number };
+
+/** A stone given no glow colour glows this (the engine's DEFAULT_GLOW, systems/mapobjects.ts). */
+const DEFAULT_GLOW = "#66ccff";
+
+export function cleanStoneObjects(raw: unknown): SavedStone[] {
+  if (!Array.isArray(raw)) throw new WorldSaveError("summoning stones must be a list");
+  return raw.map((s: any) => {
+    const name = String(s?.name ?? "");
+    if (!finiteNum(s?.position?.x) || !finiteNum(s?.position?.y)) throw new WorldSaveError(`summoning stone ${name}: has no position`);
+    const glow = s?.glowColor == null ? DEFAULT_GLOW : s.glowColor;
+    if (typeof glow !== "string" || !/^#[0-9a-f]{6}$/i.test(glow.trim())) throw new WorldSaveError(`summoning stone ${name}: glow colour must be #rrggbb`);
+    return { name, glowColor: glow.trim().toLowerCase(), x: s.position.x, y: s.position.y };
+  });
+}
+
+/** A stone's Tiled properties, as the engine reads them (systems/mapobjects.ts readStoneObject). */
+export const stoneProperties = (s: SavedStone) => [{ name: "glow_color", type: "string", value: s.glowColor }];
+
+export const chestProperties = (c: SavedChest) => [{ name: "loot_table", type: "int", value: c.lootTableId }, { name: "reset_minutes", type: "int", value: c.resetMinutes }];
+/** A portal's Tiled properties, as the engine reads them (systems/mapobjects.ts readPortalObject). */
+export const portalProperties = (p: SavedPortal) => [
+  ...(p.kind === "dungeon" && p.dungeonId !== null ? [{ name: "dungeon", type: "int", value: p.dungeonId }] : []),
+  { name: "kind", type: "string", value: p.kind },
+  { name: "mirror", type: "bool", value: p.mirror },
+  ...(p.kind === "teleport" && p.target ? [
+    { name: "map", type: "string", value: p.target.map }, { name: "x", type: "int", value: p.target.x }, { name: "y", type: "int", value: p.target.y },
+  ] : []),
+  ...(p.returnOf ? [
+    { name: "return_of_map", type: "string", value: p.returnOf.map }, { name: "return_of", type: "string", value: p.returnOf.name },
+  ] : []),
+];
+
+export function saveWorldProperties(world: World, graveyards?: any, warps?: any, zones?: unknown, chests?: unknown, dungeonPortals?: unknown, summoningStones?: unknown): void {
   // the save builds on the manifest as it is on disk, so objects saved there by another program are kept
   refreshWorld(world);
   const manifest = world.manifest;
@@ -613,6 +700,10 @@ export function saveWorldProperties(world: World, graveyards?: any, warps?: any,
     };
   });
 
+  const newChests = chests === undefined ? null : cleanChestObjects(chests);
+  const newPortals = dungeonPortals === undefined ? null : cleanPortalObjects(dungeonPortals);
+  const newStones = summoningStones === undefined ? null : cleanStoneObjects(summoningStones);
+
   let newZones: MapZone[] | null = null;
   if (zones !== undefined) {
     const cleaned = cleanZones(zones, Number(manifest.width) || world.width, Number(manifest.height) || world.height);
@@ -626,6 +717,15 @@ export function saveWorldProperties(world: World, graveyards?: any, warps?: any,
   }
   if (newWarps) {
     replace("Warps", old => newWarps.map(w => ({ id: old.get(w.name)?.id ?? nextId++, layer: "Warps", name: w.name, type: "warp", x: w.x, y: w.y, width: w.width, height: w.height, properties: w.properties })));
+  }
+  if (newChests) {
+    replace("Chests", old => newChests.map(c => ({ id: old.get(c.name)?.id ?? nextId++, layer: "Chests", name: c.name, type: "chest", x: c.x, y: c.y, width: 0, height: 0, point: true, properties: chestProperties(c) })));
+  }
+  if (newPortals) {
+    replace("Dungeon Portals", old => newPortals.map(p => ({ id: old.get(p.name)?.id ?? nextId++, layer: "Dungeon Portals", name: p.name, type: "dungeon_portal", x: p.x, y: p.y, width: p.width, height: p.height, properties: portalProperties(p) })));
+  }
+  if (newStones) {
+    replace("Summoning Stones", old => newStones.map(s => ({ id: old.get(s.name)?.id ?? nextId++, layer: "Summoning Stones", name: s.name, type: "summoning_stone", x: s.x, y: s.y, width: 0, height: 0, point: true, properties: stoneProperties(s) })));
   }
   manifest.nextObjectId = nextId;
   manifest.worldRev = (Number(manifest.worldRev) || 0) + 1;

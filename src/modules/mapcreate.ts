@@ -28,6 +28,8 @@ const TILE_LAYERS: Array<{ name: string; role: "tiles" | "nopvp" | "collision"; 
 const OBJECT_LAYERS: Array<{ name: string; visible: boolean; locked?: boolean }> = [
   { name: "Warps", visible: true, locked: true },
   { name: "Graveyards", visible: true, locked: true },
+  { name: "Dungeon Portals", visible: true, locked: true },
+  { name: "Chests", visible: true, locked: true },
   { name: "Particles", visible: false },
 ];
 

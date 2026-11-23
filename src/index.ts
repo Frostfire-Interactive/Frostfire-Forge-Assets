@@ -10,7 +10,7 @@ import { initializeAssets, applyChunksWithRebase, getAssetsPath, normalizeInfini
 import assetCache from "./services/assetCache";
 import { revalidated } from "./modules/assetversion";
 import mapChanges, { mapEventStream } from "./modules/mapchanges";
-import { addWorld, getWorld, listWorlds, readWorldFile, readChunkTiles, buildWorldChunk, saveWorldChunks, saveWorldProperties, WorldSaveError, WORLD_SYNC_FILES, type WorldSyncFile } from "./modules/worldstore";
+import { addWorld, getWorld, listWorlds, readWorldFile, readChunkTiles, buildWorldChunk, saveWorldChunks, saveWorldProperties, cleanChestObjects, cleanPortalObjects, cleanStoneObjects, chestProperties, portalProperties, stoneProperties, WorldSaveError, WORLD_SYNC_FILES, type WorldSyncFile } from "./modules/worldstore";
 import { cleanZones } from "./modules/zones";
 import { TilesetImages, bakeChunkedWorldMap } from "./modules/worldmap";
 import { checkTileSoundChanges, getTileSounds, saveTileSounds, type TileSoundChange } from "./modules/tilesounds";
@@ -658,8 +658,8 @@ const routes = {
   "/save-map-properties": {
     POST: async (req: Request) => {
       try {
-        const body = await req.json() as { mapName: string; graveyards?: any; warps?: any; zones?: unknown; authKey: string };
-        const { mapName, graveyards, warps, zones, authKey: requestAuthKey } = body;
+        const body = await req.json() as { mapName: string; graveyards?: any; warps?: any; zones?: unknown; chests?: unknown; dungeonPortals?: unknown; summoningStones?: unknown; authKey: string };
+        const { mapName, graveyards, warps, zones, chests, dungeonPortals, summoningStones, authKey: requestAuthKey } = body;
 
         if (requestAuthKey !== authKey) {
           return new Response(JSON.stringify({ error: "Invalid authentication key" }), { status: 401, headers: CORS_HEADERS });
@@ -681,7 +681,7 @@ const routes = {
         const world = getWorld(mapFile);
         if (world) {
           try {
-            saveWorldProperties(world, graveyards, warps, zones);
+            saveWorldProperties(world, graveyards, warps, zones, chests, dungeonPortals, summoningStones);
             mapChanges.worldsChanged();
             log.info(`[AssetServer] World ${world.id}: graveyards / warps / zones saved`);
             return new Response(JSON.stringify({ success: true, checksum: world.checksum, message: `Saved properties for map ${mapName}` }), { status: 200, headers: CORS_HEADERS });
@@ -708,6 +708,45 @@ const routes = {
             return new Response(JSON.stringify({ error: cleaned.error }), { status: 400, headers: CORS_HEADERS });
           }
           mapData.zones = cleaned.zones;
+        }
+
+        let chestObjects: ReturnType<typeof cleanChestObjects> | null = null;
+        let portalObjects: ReturnType<typeof cleanPortalObjects> | null = null;
+        let stoneObjects: ReturnType<typeof cleanStoneObjects> | null = null;
+        try {
+          if (chests !== undefined) chestObjects = cleanChestObjects(chests);
+          if (dungeonPortals !== undefined) portalObjects = cleanPortalObjects(dungeonPortals);
+          if (summoningStones !== undefined) stoneObjects = cleanStoneObjects(summoningStones);
+        } catch (objectError: any) {
+          if (objectError instanceof WorldSaveError) {
+            return new Response(JSON.stringify({ error: objectError.message }), { status: 400, headers: CORS_HEADERS });
+          }
+          throw objectError;
+        }
+
+        const writeObjectLayer = (layerName: string, objects: any[]) => {
+          let layer = mapData.layers.find((l: any) => l.name === layerName && l.type === "objectgroup");
+          if (!layer) {
+            layer = { draworder: "topdown", id: Math.max(...mapData.layers.map((l: any) => l.id || 0), 0) + 1, name: layerName, objects: [], opacity: 1, type: "objectgroup", visible: true, x: 0, y: 0 };
+            mapData.layers.push(layer);
+          }
+          const existing = new Map<string, any>((layer.objects ?? []).map((o: any) => [o.name, o]));
+          let nextId = Math.max(1, ...(layer.objects ?? []).map((o: any) => o.id || 0)) + 1;
+          layer.objects = objects.map((o) => ({ ...existing.get(o.name), id: existing.get(o.name)?.id || nextId++, rotation: 0, visible: true, ...o }));
+        };
+        if (chestObjects) {
+          mapData.chests = chests;
+          writeObjectLayer("Chests", chestObjects.map((c) => ({ name: c.name, type: "chest", x: c.x, y: c.y, width: 0, height: 0, point: true, properties: chestProperties(c) })));
+        }
+        if (portalObjects) {
+          mapData.dungeonPortals = dungeonPortals;
+          writeObjectLayer("Dungeon Portals", portalObjects.map((p) => ({ name: p.name, type: "dungeon_portal", x: p.x, y: p.y, width: p.width, height: p.height, properties: portalProperties(p) })));
+        }
+        // left out, the stones are kept; given, they are kept as sent with the glow colour cleaned (lower case)
+        if (stoneObjects) {
+          const sent = summoningStones as any[];
+          mapData.summoningStones = stoneObjects.map((s, i) => ({ name: s.name, position: { x: s.x, y: s.y }, glowColor: s.glowColor, layer: typeof sent[i]?.layer === "string" ? sent[i].layer : null }));
+          writeObjectLayer("Summoning Stones", stoneObjects.map((s) => ({ name: s.name, type: "summoning_stone", x: s.x, y: s.y, width: 0, height: 0, point: true, properties: stoneProperties(s) })));
         }
 
         log.info(`[AssetServer] Before update - mapData has graveyards: ${mapData.graveyards ? 'yes' : 'no'}, warps: ${mapData.warps ? 'yes' : 'no'}`);
